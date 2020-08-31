@@ -116,7 +116,7 @@ class ClassificationModel:
             "flaubert": (FlaubertConfig, FlaubertForSequenceClassification, FlaubertTokenizer),
             "longformer": (LongformerConfig, LongformerForSequenceClassification, LongformerTokenizer),
             "mobilebert": (MobileBertConfig, MobileBertForSequenceClassification, MobileBertTokenizer),
-            "roberta": (RobertaConfig, RobertaForSequenceClassification, RobertaTokenizer),
+            "roberta": (RobertaConfig, RobertaForSequenceClassification, BertTokenizer),
             "xlnet": (XLNetConfig, XLNetForSequenceClassification, XLNetTokenizer),
             "xlm": (XLMConfig, XLMForSequenceClassification, XLMTokenizer),
             "xlmroberta": (XLMRobertaConfig, XLMRobertaForSequenceClassification, XLMRobertaTokenizer),
