@@ -4,6 +4,102 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.48.7] - 2020-09-26
+
+### Added
+
+-  Added support for multilabel classification with the CamemBERT model. [@adrienrenaud](https://github.com/adrienrenaud)
+
+### Changed
+
+- Output arrays in classification evaluate/predict now avoids `np.append()`. This should be more time and memory efficient.
+
+## [0.48.6] - 2020-09-26
+
+### Added
+
+- Added `layoutlm` model for NER
+
+### Fixed
+
+- Potential fix for inconsistent `eval_loss` calculation
+
+## [0.48.5] - 2020-09-17
+
+### Added
+
+- Added `convert_to_onnx` function to the following models:
+  - ClassificationModel
+  - NERModel
+- Converted ONNX models can be loaded (requires specifying `onnx: True` in model_args) and used for prediction.
+- Added `fp16` support for evaluation and prediction (requires Pytorch >= 1.6) for the following models:
+  - ClassificationModel
+  - ConvAI
+  - MultiModalClassificationModel
+  - NERModel
+  - QuestionAnsweringModel
+  - Seq2Seq
+  - T5Model
+- Added multigpu prediction/eval in
+  - ClassificationModel
+  - ConvAI
+  - MultiModalClassificationModel
+  - NERModel
+  - QuestionAnsweringModel
+  - Seq2Seq
+  - T5Model
+
+### Fixed
+
+- Thread count can now be specified for MultiLabelClassificationModel.
+
+
+## [0.48.4] - 2020-09-23
+
+### Fixed
+
+- Fixed compatibility issue with transformers 3.2. (BertPreTrainedModel was being imported from an incompatible path)
+
+## [0.48.3] - 2020-09-08
+
+- Version numbering issue fixed.
+
+## [0.48.2] - 2020-09-08
+
+### Fixed
+
+- Fixed missing `padding_strategy` argument in `squad_convert_example_to_features()`
+
+## [0.48.1] - 2020-09-08
+
+### Fixed
+
+- Bug when using sliding window with multiclass classification
+- Bug in ConvAI where model was being accessed before being created
+
+## [0.48.0] - 2020-09-06
+
+### Added
+
+- Added dynamic quantization support for all models.
+- Added ConvAI docs to documentation website. [@pablonm3](https://github.com/pablonm3)
+
+## [0.47.6] - 2020-09-01
+
+### Fixed
+
+- Fixed missing `padding_strategy` argument in `squad_convert_example_to_features()` [cahya-wirawan](https://github.com/cahya-wirawan)
+
+## [0.47.5] - 2020-09-01
+
+### Added
+
+- Added dynamic quantization, `thread_count` arg, and avoids padding during inference for Classification models. [karthik19967829](https://github.com/karthik19967829)
+-
+### Fixed
+
+- Bug fix which fixes reprocessing data after reading from cache in Seq2SeqDataset and SimpleSummarizationDataset [@Zhylkaaa](https://github.com/Zhylkaaa)
+
 ## [0.47.4] - 2020-08-29
 
 ### Fixed
@@ -1057,7 +1153,19 @@ Model checkpoint is now saved for all epochs again.
 
 - This CHANGELOG file to hopefully serve as an evolving example of a standardized open source project CHANGELOG.
 
-[0.47.4]: https://github.com/ThilinaRajapakse/simpletransformers/compare/bd4c397...HEAD
+[0.48.7]: https://github.com/ThilinaRajapakse/simpletransformers/compare/25fa010...HEAD
+
+[0.48.6]: https://github.com/ThilinaRajapakse/simpletransformers/compare/6f75f8e...25fa010
+
+[0.48.5]: https://github.com/ThilinaRajapakse/simpletransformers/compare/39d25d0...6f75f8e
+
+[0.48.4]: https://github.com/ThilinaRajapakse/simpletransformers/compare/7ef56b0...39d25d0
+
+[0.48.1]: https://github.com/ThilinaRajapakse/simpletransformers/compare/8c1ae68...7ef56b0
+
+[0.48.0]: https://github.com/ThilinaRajapakse/simpletransformers/compare/d62ce56...0f678f2
+
+[0.47.4]: https://github.com/ThilinaRajapakse/simpletransformers/compare/bd4c397...d62ce56
 
 [0.47.3]: https://github.com/ThilinaRajapakse/simpletransformers/compare/78ffa94...bd4c397
 

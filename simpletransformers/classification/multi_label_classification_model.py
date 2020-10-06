@@ -1,4 +1,5 @@
 import logging
+import os
 import random
 import warnings
 from multiprocessing import cpu_count
@@ -11,6 +12,8 @@ from transformers import (
     AlbertTokenizer,
     BertConfig,
     BertTokenizer,
+    CamembertConfig,
+    CamembertTokenizer,
     DistilBertConfig,
     DistilBertTokenizer,
     ElectraConfig,
@@ -33,6 +36,7 @@ from simpletransformers.config.model_args import MultiLabelClassificationArgs
 from simpletransformers.custom_models.models import (
     AlbertForMultiLabelSequenceClassification,
     BertForMultiLabelSequenceClassification,
+    CamembertForMultiLabelSequenceClassification,
     DistilBertForMultiLabelSequenceClassification,
     ElectraForMultiLabelSequenceClassification,
     FlaubertForMultiLabelSequenceClassification,
@@ -81,6 +85,7 @@ class MultiLabelClassificationModel(ClassificationModel):
 
         MODEL_CLASSES = {
             "bert": (BertConfig, BertForMultiLabelSequenceClassification, BertTokenizer,),
+            "camembert": (CamembertConfig, CamembertForMultiLabelSequenceClassification, CamembertTokenizer,),
             "roberta": (RobertaConfig, RobertaForMultiLabelSequenceClassification, RobertaTokenizer,),
             "xlnet": (XLNetConfig, XLNetForMultiLabelSequenceClassification, XLNetTokenizer,),
             "xlm": (XLMConfig, XLMForMultiLabelSequenceClassification, XLMTokenizer),
@@ -97,6 +102,9 @@ class MultiLabelClassificationModel(ClassificationModel):
             self.args.update_from_dict(args)
         elif isinstance(args, MultiLabelClassificationArgs):
             self.args = args
+
+        if self.args.thread_count:
+            torch.set_num_threads(self.args.thread_count)
 
         if "sweep_config" in kwargs:
             sweep_config = kwargs.pop("sweep_config")
@@ -136,12 +144,31 @@ class MultiLabelClassificationModel(ClassificationModel):
         else:
             self.device = "cpu"
 
-        if self.pos_weight:
-            self.model = model_class.from_pretrained(
-                model_name, config=self.config, pos_weight=torch.Tensor(self.pos_weight).to(self.device), **kwargs
-            )
+        if not self.args.quantized_model:
+            if self.pos_weight:
+                self.model = model_class.from_pretrained(
+                    model_name, config=self.config, pos_weight=torch.Tensor(self.pos_weight).to(self.device), **kwargs
+                )
+            else:
+                self.model = model_class.from_pretrained(model_name, config=self.config, **kwargs)
         else:
-            self.model = model_class.from_pretrained(model_name, config=self.config, **kwargs)
+            quantized_weights = torch.load(os.path.join(model_name, "pytorch_model.bin"))
+            if self.pos_weight:
+                self.model = model_class.from_pretrained(
+                    None,
+                    config=self.config,
+                    state_dict=quantized_weights,
+                    weight=torch.Tensor(self.pos_weight).to(self.device),
+                )
+            else:
+                self.model = model_class.from_pretrained(None, config=self.config, state_dict=quantized_weights)
+
+        if self.args.dynamic_quantize:
+            self.model = torch.quantization.quantize_dynamic(self.model, {torch.nn.Linear}, dtype=torch.qint8)
+        if self.args.quantized_model:
+            self.model.load_state_dict(quantized_weights)
+        if self.args.dynamic_quantize:
+            self.args.quantized_model = True
 
         self.results = {}
 

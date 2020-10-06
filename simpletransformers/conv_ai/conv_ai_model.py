@@ -115,10 +115,24 @@ class ConvAIModel:
 
         config_class, model_class, tokenizer_class = MODEL_CLASSES[model_type]
         self.__dict__.update(kwargs)
+        self.config = config_class.from_pretrained(model_name, **self.args.config)
 
-        self.model = model_class.from_pretrained(model_name, **kwargs)
+        if not self.args.quantized_model:
+            self.model = model_class.from_pretrained(model_name, **kwargs)
+        else:
+            quantized_weights = torch.load(os.path.join(model_name, "pytorch_model.bin"))
+            self.model = model_class.from_pretrained(None, config=self.config, state_dict=quantized_weights)
+
         self.tokenizer = tokenizer_class.from_pretrained(model_name, **kwargs)
         self.add_special_tokens_(self.model, self.tokenizer)
+
+        if self.args.dynamic_quantize:
+            self.model = torch.quantization.quantize_dynamic(self.model, {torch.nn.Linear}, dtype=torch.qint8)
+        if self.args.quantized_model:
+            self.model.load_state_dict(quantized_weights)
+        if self.args.dynamic_quantize:
+            self.args.quantized_model = True
+
         self.results = {}
 
         if use_cuda:
@@ -183,9 +197,8 @@ class ConvAIModel:
         if os.path.exists(output_dir) and os.listdir(output_dir) and not self.args.overwrite_output_dir:
             raise ValueError(
                 "Output directory ({}) already exists and is not empty."
-                " Use --overwrite_output_dir to overcome.".format(output_dir)
+                " Set overwrite_output_dir: True to automatically overwrite.".format(output_dir)
             )
-
         self._move_model_to_device()
 
         train_dataloader, train_sampler = self.load_and_cache_examples(
@@ -208,7 +221,7 @@ class ConvAIModel:
             **kwargs,
         )
 
-        self._save_model(model=self.model)
+        self.save_model(model=self.model)
 
         if verbose:
             logger.info(" Training of {} model complete. Saved to {}.".format(self.args.model_type, output_dir))
@@ -399,7 +412,7 @@ class ConvAIModel:
                         # Save model checkpoint
                         output_dir_current = os.path.join(output_dir, "checkpoint-{}".format(global_step))
 
-                        self._save_model(output_dir_current, model=model)
+                        self.save_model(output_dir_current, model=model)
 
                     if args.evaluate_during_training and (
                         args.evaluate_during_training_steps > 0
@@ -418,7 +431,7 @@ class ConvAIModel:
                         output_dir_current = os.path.join(output_dir, "checkpoint-{}".format(global_step))
 
                         if args.save_eval_checkpoints:
-                            self._save_model(output_dir_current, model=model, results=results)
+                            self.save_model(output_dir_current, model=model, results=results)
 
                         training_progress_scores["global_step"].append(global_step)
                         training_progress_scores["train_loss"].append(current_loss)
@@ -434,11 +447,11 @@ class ConvAIModel:
 
                         if not best_eval_metric:
                             best_eval_metric = results[args.early_stopping_metric]
-                            self._save_model(args.best_model_dir, model=model, results=results)
+                            self.save_model(args.best_model_dir, model=model, results=results)
                         if best_eval_metric and args.early_stopping_metric_minimize:
                             if results[args.early_stopping_metric] - best_eval_metric < args.early_stopping_delta:
                                 best_eval_metric = results[args.early_stopping_metric]
-                                self._save_model(args.best_model_dir, model=model, results=results)
+                                self.save_model(args.best_model_dir, model=model, results=results)
                                 early_stopping_counter = 0
                             else:
                                 if args.use_early_stopping:
@@ -457,7 +470,7 @@ class ConvAIModel:
                         else:
                             if results[args.early_stopping_metric] - best_eval_metric > args.early_stopping_delta:
                                 best_eval_metric = results[args.early_stopping_metric]
-                                self._save_model(args.best_model_dir, model=model, results=results)
+                                self.save_model(args.best_model_dir, model=model, results=results)
                                 early_stopping_counter = 0
                             else:
                                 if args.use_early_stopping:
@@ -481,14 +494,14 @@ class ConvAIModel:
                 os.makedirs(output_dir_current, exist_ok=True)
 
             if args.save_model_every_epoch:
-                self._save_model(output_dir_current, model=model)
+                self.save_model(output_dir_current, model=model)
 
-            if args.evaluate_during_training:
+            if args.evaluate_during_training and args.evaluate_each_epoch:
                 results, _, _ = self.eval_model(
                     eval_dataloader, verbose=verbose and args.evaluate_during_training_verbose, silent=True, **kwargs,
                 )
 
-                self._save_model(output_dir_current, results=results)
+                self.save_model(output_dir_current, results=results)
 
                 training_progress_scores["global_step"].append(global_step)
                 training_progress_scores["train_loss"].append(current_loss)
@@ -502,16 +515,16 @@ class ConvAIModel:
 
                 if not best_eval_metric:
                     best_eval_metric = results[args.early_stopping_metric]
-                    self._save_model(args.best_model_dir, model=model, results=results)
+                    self.save_model(args.best_model_dir, model=model, results=results)
                 if best_eval_metric and args.early_stopping_metric_minimize:
                     if results[args.early_stopping_metric] - best_eval_metric < args.early_stopping_delta:
                         best_eval_metric = results[args.early_stopping_metric]
-                        self._save_model(args.best_model_dir, model=model, results=results)
+                        self.save_model(args.best_model_dir, model=model, results=results)
                         early_stopping_counter = 0
                 else:
                     if results[args.early_stopping_metric] - best_eval_metric > args.early_stopping_delta:
                         best_eval_metric = results[args.early_stopping_metric]
-                        self._save_model(args.best_model_dir, model=model, results=results)
+                        self.save_model(args.best_model_dir, model=model, results=results)
                         early_stopping_counter = 0
 
         return global_step, tr_loss / global_step
@@ -574,13 +587,27 @@ class ConvAIModel:
         }
         model.eval()
 
+        if args.n_gpu > 1:
+            model = torch.nn.DataParallel(model)
+
+        if args.fp16:
+            from torch.cuda import amp
+
         for batch in tqdm(eval_dataloader, disable=args.silent or silent, desc="Running Evaluation"):
             batch = tuple(t.to(device) for t in batch)
 
             with torch.no_grad():
                 input_ids, mc_token_ids, lm_labels, mc_labels, token_type_ids = batch
 
-                lm_logits, mc_logits, *_ = model(input_ids, token_type_ids=token_type_ids, mc_token_ids=mc_token_ids,)
+                if args.fp16:
+                    with amp.autocast():
+                        lm_logits, mc_logits, *_ = model(
+                            input_ids, token_type_ids=token_type_ids, mc_token_ids=mc_token_ids,
+                        )
+                else:
+                    lm_logits, mc_logits, *_ = model(
+                        input_ids, token_type_ids=token_type_ids, mc_token_ids=mc_token_ids,
+                    )
                 # model outputs are always tuple in pytorch-transformers (see doc)
 
                 lm_logits_flat_shifted = lm_logits[..., :-1, :].contiguous().view(-1, lm_logits.size(-1))
@@ -726,6 +753,9 @@ class ConvAIModel:
         tokenizer = self.tokenizer
         process_count = self.args.process_count
 
+        if self.args.fp16:
+            from torch.cuda import amp
+
         self._move_model_to_device()
 
         if not personality:
@@ -751,7 +781,11 @@ class ConvAIModel:
                 raw_text = input(">>> ")
             history.append(tokenizer.encode(raw_text))
             with torch.no_grad():
-                out_ids = self.sample_sequence(personality, history, tokenizer, model, args)
+                if args.fp16:
+                    with amp.autocast():
+                        out_ids = self.sample_sequence(personality, history, tokenizer, model, args)
+                else:
+                    out_ids = self.sample_sequence(personality, history, tokenizer, model, args)
             history.append(out_ids)
             history = history[-(2 * args.max_history + 1) :]
             out_text = tokenizer.decode(out_ids, skip_special_tokens=True)
@@ -769,7 +803,7 @@ class ConvAIModel:
                             The history will be tokenized and encoded.
 
         Returns:
-            out_text: the response generated by the model based on the personality, history and message.
+            out_text: The response generated by the model based on the personality, history and message.
             history: The updated history of the conversation. If encode_history is True, this will be in text form.
                         If not, it will be in encoded form.
         """
@@ -777,6 +811,9 @@ class ConvAIModel:
         args = self.args
         tokenizer = self.tokenizer
         process_count = self.args.process_count
+
+        if self.args.fp16:
+            from torch.cuda import amp
 
         self._move_model_to_device()
 
@@ -800,7 +837,11 @@ class ConvAIModel:
             history = [tokenizer.encode(sentence) for sentence in history]
         history.append(tokenizer.encode(message))
         with torch.no_grad():
-            out_ids = self.sample_sequence(personality, history, tokenizer, model, args)
+            if args.fp16:
+                with amp.autocast():
+                    out_ids = self.sample_sequence(personality, history, tokenizer, model, args)
+            else:
+                out_ids = self.sample_sequence(personality, history, tokenizer, model, args)
         out_text = tokenizer.decode(out_ids, skip_special_tokens=True)
 
         if encode_history:
@@ -838,7 +879,7 @@ class ConvAIModel:
 
         return training_progress_scores
 
-    def _save_model(self, output_dir=None, model=None, results=None):
+    def save_model(self, output_dir=None, model=None, results=None):
         if not output_dir:
             output_dir = self.args.output_dir
 
@@ -847,7 +888,7 @@ class ConvAIModel:
             model_to_save = model.module if hasattr(model, "module") else model
             model_to_save.save_pretrained(output_dir)
             self.tokenizer.save_pretrained(output_dir)
-            self._save_model_args(output_dir)
+            self.save_model_args(output_dir)
 
         if results:
             output_eval_file = os.path.join(output_dir, "eval_results.txt")
@@ -958,7 +999,7 @@ class ConvAIModel:
 
         return current_output
 
-    def _save_model_args(self, output_dir):
+    def save_model_args(self, output_dir):
         os.makedirs(output_dir, exist_ok=True)
         self.args.save(output_dir)
 

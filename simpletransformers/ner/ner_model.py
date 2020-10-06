@@ -8,6 +8,8 @@ import random
 import warnings
 from dataclasses import asdict
 from multiprocessing import cpu_count
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -48,8 +50,13 @@ from transformers import (
     XLMRobertaConfig,
     XLMRobertaForTokenClassification,
     XLMRobertaTokenizer,
+    LayoutLMConfig,
+    LayoutLMForTokenClassification,
+    LayoutLMTokenizer,
     get_linear_schedule_with_warmup,
 )
+from wandb import config
+from transformers.convert_graph_to_onnx import convert, quantize
 
 from simpletransformers.config.global_args import global_args
 from simpletransformers.config.model_args import NERArgs
@@ -74,7 +81,15 @@ logger = logging.getLogger(__name__)
 
 class NERModel:
     def __init__(
-        self, model_type, model_name, labels=None, args=None, use_cuda=True, cuda_device=-1, **kwargs,
+        self,
+        model_type,
+        model_name,
+        labels=None,
+        args=None,
+        use_cuda=True,
+        cuda_device=-1,
+        onnx_execution_provider=None,
+        **kwargs,
     ):
         """
         Initializes a NERModel
@@ -98,6 +113,7 @@ class NERModel:
             "longformer": (LongformerConfig, LongformerForTokenClassification, LongformerTokenizer),
             "roberta": (RobertaConfig, RobertaForTokenClassification, RobertaTokenizer),
             "xlmroberta": (XLMRobertaConfig, XLMRobertaForTokenClassification, XLMRobertaTokenizer),
+            "layoutlm": (LayoutLMConfig, LayoutLMForTokenClassification, LayoutLMTokenizer),
         }
 
         self.args = self._load_model_args(model_name)
@@ -151,8 +167,6 @@ class NERModel:
             self.config = config_class.from_pretrained(model_name, **self.args.config)
             self.num_labels = self.config.num_labels
 
-        self.model = model_class.from_pretrained(model_name, config=self.config, **kwargs)
-
         if use_cuda:
             if torch.cuda.is_available():
                 if cuda_device == -1:
@@ -167,7 +181,42 @@ class NERModel:
         else:
             self.device = "cpu"
 
+        if self.args.onnx:
+            from onnxruntime import InferenceSession, SessionOptions
+
+            if not onnx_execution_provider:
+                onnx_execution_provider = "CUDAExecutionProvider" if use_cuda else "CPUExecutionProvider"
+
+            options = SessionOptions()
+            options.intra_op_num_threads = 1
+
+            if self.args.dynamic_quantize:
+                model_path = quantize(Path(os.path.join(model_name, "onnx_model.onnx")))
+                self.model = InferenceSession(model_path.as_posix(), options, providers=[onnx_execution_provider])
+            else:
+                model_path = os.path.join(model_name, "onnx_model.onnx")
+                self.model = InferenceSession(model_path, options, providers=[onnx_execution_provider])
+        else:
+            if not self.args.quantized_model:
+                self.model = model_class.from_pretrained(model_name, config=self.config, **kwargs)
+            else:
+                quantized_weights = torch.load(os.path.join(model_name, "pytorch_model.bin"))
+                self.model = model_class.from_pretrained(None, config=self.config, state_dict=quantized_weights)
+
+            if self.args.dynamic_quantize:
+                self.model = torch.quantization.quantize_dynamic(self.model, {torch.nn.Linear}, dtype=torch.qint8)
+            if self.args.quantized_model:
+                self.model.load_state_dict(quantized_weights)
+            if self.args.dynamic_quantize:
+                self.args.quantized_model = True
+
         self.results = {}
+
+        if self.args.fp16:
+            try:
+                from torch.cuda import amp
+            except AttributeError:
+                raise AttributeError("fp16 requires Pytorch >= 1.6. Please update Pytorch or turn off fp16.")
 
         self.tokenizer = tokenizer_class.from_pretrained(model_name, do_lower_case=self.args.do_lower_case, **kwargs)
 
@@ -247,7 +296,7 @@ class NERModel:
             train_dataset, output_dir, show_running_loss=show_running_loss, eval_data=eval_data, **kwargs
         )
 
-        self._save_model(model=self.model)
+        self.save_model(model=self.model)
 
         logger.info(" Training of {} model complete. Saved to {}.".format(self.args.model_type, output_dir))
 
@@ -375,7 +424,7 @@ class NERModel:
             wandb.init(project=args.wandb_project, config={**asdict(args)}, **args.wandb_kwargs)
             wandb.watch(self.model)
 
-        if args.fp16:
+        if self.args.fp16:
             from torch.cuda import amp
 
             scaler = amp.GradScaler()
@@ -400,7 +449,7 @@ class NERModel:
 
                 inputs = self._get_inputs_dict(batch)
 
-                if args.fp16:
+                if self.args.fp16:
                     with amp.autocast():
                         outputs = model(**inputs)
                         # model outputs are always tuple in pytorch-transformers (see doc)
@@ -423,18 +472,18 @@ class NERModel:
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
 
-                if args.fp16:
+                if self.args.fp16:
                     scaler.scale(loss).backward()
                 else:
                     loss.backward()
 
                 tr_loss += loss.item()
                 if (step + 1) % args.gradient_accumulation_steps == 0:
-                    if args.fp16:
+                    if self.args.fp16:
                         scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
-                    if args.fp16:
+                    if self.args.fp16:
                         scaler.step(optimizer)
                         scaler.update()
                     else:
@@ -463,7 +512,7 @@ class NERModel:
                         # Save model checkpoint
                         output_dir_current = os.path.join(output_dir, "checkpoint-{}".format(global_step))
 
-                        self._save_model(output_dir_current, optimizer, scheduler, model=model)
+                        self.save_model(output_dir_current, optimizer, scheduler, model=model)
 
                     if args.evaluate_during_training and (
                         args.evaluate_during_training_steps > 0
@@ -486,7 +535,7 @@ class NERModel:
                             tb_writer.add_scalar("eval_{}".format(key), value, global_step)
 
                         if args.save_eval_checkpoints:
-                            self._save_model(output_dir_current, optimizer, scheduler, model=model, results=results)
+                            self.save_model(output_dir_current, optimizer, scheduler, model=model, results=results)
 
                         training_progress_scores["global_step"].append(global_step)
                         training_progress_scores["train_loss"].append(current_loss)
@@ -502,11 +551,11 @@ class NERModel:
 
                         if not best_eval_metric:
                             best_eval_metric = results[args.early_stopping_metric]
-                            self._save_model(args.best_model_dir, optimizer, scheduler, model=model, results=results)
+                            self.save_model(args.best_model_dir, optimizer, scheduler, model=model, results=results)
                         if best_eval_metric and args.early_stopping_metric_minimize:
                             if results[args.early_stopping_metric] - best_eval_metric < args.early_stopping_delta:
                                 best_eval_metric = results[args.early_stopping_metric]
-                                self._save_model(
+                                self.save_model(
                                     args.best_model_dir, optimizer, scheduler, model=model, results=results
                                 )
                                 early_stopping_counter = 0
@@ -527,7 +576,7 @@ class NERModel:
                         else:
                             if results[args.early_stopping_metric] - best_eval_metric > args.early_stopping_delta:
                                 best_eval_metric = results[args.early_stopping_metric]
-                                self._save_model(
+                                self.save_model(
                                     args.best_model_dir, optimizer, scheduler, model=model, results=results
                                 )
                                 early_stopping_counter = 0
@@ -553,14 +602,14 @@ class NERModel:
                 os.makedirs(output_dir_current, exist_ok=True)
 
             if args.save_model_every_epoch:
-                self._save_model(output_dir_current, optimizer, scheduler, model=model)
+                self.save_model(output_dir_current, optimizer, scheduler, model=model)
 
-            if args.evaluate_during_training:
+            if args.evaluate_during_training and args.evaluate_each_epoch:
                 results, _, _ = self.eval_model(
                     eval_data, verbose=verbose and args.evaluate_during_training_verbose, wandb_log=False, **kwargs
                 )
 
-                self._save_model(output_dir_current, optimizer, scheduler, results=results)
+                self.save_model(output_dir_current, optimizer, scheduler, results=results)
 
                 training_progress_scores["global_step"].append(global_step)
                 training_progress_scores["train_loss"].append(current_loss)
@@ -574,11 +623,11 @@ class NERModel:
 
                 if not best_eval_metric:
                     best_eval_metric = results[args.early_stopping_metric]
-                    self._save_model(args.best_model_dir, optimizer, scheduler, model=model, results=results)
+                    self.save_model(args.best_model_dir, optimizer, scheduler, model=model, results=results)
                 if best_eval_metric and args.early_stopping_metric_minimize:
                     if results[args.early_stopping_metric] - best_eval_metric < args.early_stopping_delta:
                         best_eval_metric = results[args.early_stopping_metric]
-                        self._save_model(args.best_model_dir, optimizer, scheduler, model=model, results=results)
+                        self.save_model(args.best_model_dir, optimizer, scheduler, model=model, results=results)
                         early_stopping_counter = 0
                     else:
                         if args.use_early_stopping and args.early_stopping_consider_epochs:
@@ -597,7 +646,7 @@ class NERModel:
                 else:
                     if results[args.early_stopping_metric] - best_eval_metric > args.early_stopping_delta:
                         best_eval_metric = results[args.early_stopping_metric]
-                        self._save_model(args.best_model_dir, optimizer, scheduler, model=model, results=results)
+                        self.save_model(args.best_model_dir, optimizer, scheduler, model=model, results=results)
                         early_stopping_counter = 0
                         early_stopping_counter = 0
                     else:
@@ -680,22 +729,29 @@ class NERModel:
         out_label_ids = None
         model.eval()
 
+        if args.n_gpu > 1:
+            model = torch.nn.DataParallel(model)
+
+        if self.args.fp16:
+            from torch.cuda import amp
+
         for batch in tqdm(eval_dataloader, disable=args.silent or silent, desc="Running Evaluation"):
             batch = tuple(t.to(device) for t in batch)
 
             with torch.no_grad():
-                inputs = {
-                    "input_ids": batch[0],
-                    "attention_mask": batch[1],
-                    "labels": batch[3],
-                }
-                # XLM and RoBERTa don"t use segment_ids
-                if args.model_type in ["bert", "xlnet"]:
-                    inputs["token_type_ids"] = batch[2]
-                outputs = model(**inputs)
-                tmp_eval_loss, logits = outputs[:2]
+                inputs = self._get_inputs_dict(batch)
 
-                eval_loss += tmp_eval_loss.mean().item()
+                if self.args.fp16:
+                    with amp.autocast():
+                        outputs = model(**inputs)
+                        tmp_eval_loss, logits = outputs[:2]
+                else:
+                    outputs = model(**inputs)
+                    tmp_eval_loss, logits = outputs[:2]
+
+                if self.args.n_gpu > 1:
+                    tmp_eval_loss = tmp_eval_loss.mean()
+                eval_loss += tmp_eval_loss.item()
 
             nb_eval_steps += 1
 
@@ -801,64 +857,111 @@ class NERModel:
         model = self.model
         args = self.args
         pad_token_label_id = self.pad_token_label_id
-
-        self._move_model_to_device()
+        preds = None
 
         if split_on_space:
-            predict_examples = [
-                InputExample(i, sentence.split(), [self.args.labels_list[0] for word in sentence.split()])
-                for i, sentence in enumerate(to_predict)
-            ]
+            if self.args.model_type == "layoutlm":
+                predict_examples = [
+                    InputExample(
+                        i, sentence.split(), [self.args.labels_list[0] for word in sentence.split()], x0, y0, x1, y1
+                    )
+                    for i, (sentence, x0, y0, x1, y1) in enumerate(to_predict)
+                ]
+                to_predict = [sentence for sentence, *_ in to_predict]
+            else:
+                predict_examples = [
+                    InputExample(i, sentence.split(), [self.args.labels_list[0] for word in sentence.split()])
+                    for i, sentence in enumerate(to_predict)
+                ]
         else:
-            predict_examples = [
-                InputExample(i, sentence, [self.args.labels_list[0] for word in sentence])
-                for i, sentence in enumerate(to_predict)
-            ]
+            if self.args.model_type == "layoutlm":
+                predict_examples = [
+                    InputExample(i, sentence, [self.args.labels_list[0] for word in sentence], x0, y0, x1, y1)
+                    for i, (sentence, x0, y0, x1, y1) in enumerate(to_predict)
+                ]
+                to_predict = [sentence for sentence, *_ in to_predict]
+            else:
+                predict_examples = [
+                    InputExample(i, sentence, [self.args.labels_list[0] for word in sentence])
+                    for i, sentence in enumerate(to_predict)
+                ]
 
         eval_dataset = self.load_and_cache_examples(None, to_predict=predict_examples)
 
         eval_sampler = SequentialSampler(eval_dataset)
         eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
-        eval_loss = 0.0
-        nb_eval_steps = 0
-        preds = None
-        out_label_ids = None
-        model.eval()
+        if self.args.onnx:
+            model_inputs = self.tokenizer.batch_encode_plus(
+                to_predict, return_tensors="pt", padding=True, truncation=True
+            )
 
-        for batch in tqdm(eval_dataloader, disable=args.silent, desc="Running Prediction"):
-            batch = tuple(t.to(device) for t in batch)
+            for input_ids, attention_mask in zip(model_inputs["input_ids"], model_inputs["attention_mask"]):
+                input_ids = input_ids.unsqueeze(0).detach().cpu().numpy()
+                attention_mask = attention_mask.unsqueeze(0).detach().cpu().numpy()
+                inputs_onnx = {"input_ids": input_ids, "attention_mask": attention_mask}
 
-            with torch.no_grad():
-                inputs = {
-                    "input_ids": batch[0],
-                    "attention_mask": batch[1],
-                    "labels": batch[3],
-                }
-                # XLM and RoBERTa don"t use segment_ids
-                if args.model_type in ["bert", "xlnet"]:
-                    inputs["token_type_ids"] = batch[2]
-                outputs = model(**inputs)
-                tmp_eval_loss, logits = outputs[:2]
+                # Run the model (None = get all the outputs)
+                output = self.model.run(None, inputs_onnx)
 
-                eval_loss += tmp_eval_loss.mean().item()
+                if preds is None:
+                    preds = output[0]
+                    out_input_ids = inputs_onnx["input_ids"]
+                    out_attention_mask = inputs_onnx["attention_mask"]
+                else:
+                    preds = np.append(preds, output[0], axis=0)
+                    out_input_ids = np.append(out_input_ids, inputs_onnx["input_ids"], axis=0)
+                    out_attention_mask = np.append(out_attention_mask, inputs_onnx["attention_mask"], axis=0,)
+            out_label_ids = np.zeros_like(out_input_ids)
+        else:
+            self._move_model_to_device()
 
-            nb_eval_steps += 1
+            eval_loss = 0.0
+            nb_eval_steps = 0
+            preds = None
+            out_label_ids = None
+            model.eval()
 
-            if preds is None:
-                preds = logits.detach().cpu().numpy()
-                out_label_ids = inputs["labels"].detach().cpu().numpy()
-                out_input_ids = inputs["input_ids"].detach().cpu().numpy()
-                out_attention_mask = inputs["attention_mask"].detach().cpu().numpy()
-            else:
-                preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
-                out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
-                out_input_ids = np.append(out_input_ids, inputs["input_ids"].detach().cpu().numpy(), axis=0)
-                out_attention_mask = np.append(
-                    out_attention_mask, inputs["attention_mask"].detach().cpu().numpy(), axis=0,
-                )
+            if args.n_gpu > 1:
+                model = torch.nn.DataParallel(model)
 
-        eval_loss = eval_loss / nb_eval_steps
+            if self.args.fp16:
+                from torch.cuda import amp
+
+            for batch in tqdm(eval_dataloader, disable=args.silent, desc="Running Prediction"):
+                batch = tuple(t.to(device) for t in batch)
+
+                with torch.no_grad():
+                    inputs = self._get_inputs_dict(batch)
+
+                    if self.args.fp16:
+                        with amp.autocast():
+                            outputs = model(**inputs)
+                            tmp_eval_loss, logits = outputs[:2]
+                    else:
+                        outputs = model(**inputs)
+                        tmp_eval_loss, logits = outputs[:2]
+
+                    if self.args.n_gpu > 1:
+                        tmp_eval_loss = tmp_eval_loss.mean()
+                    eval_loss += tmp_eval_loss.item()
+
+                nb_eval_steps += 1
+
+                if preds is None:
+                    preds = logits.detach().cpu().numpy()
+                    out_label_ids = inputs["labels"].detach().cpu().numpy()
+                    out_input_ids = inputs["input_ids"].detach().cpu().numpy()
+                    out_attention_mask = inputs["attention_mask"].detach().cpu().numpy()
+                else:
+                    preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
+                    out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
+                    out_input_ids = np.append(out_input_ids, inputs["input_ids"].detach().cpu().numpy(), axis=0)
+                    out_attention_mask = np.append(
+                        out_attention_mask, inputs["attention_mask"].detach().cpu().numpy(), axis=0,
+                    )
+
+            eval_loss = eval_loss / nb_eval_steps
         token_logits = preds
         preds = np.argmax(preds, axis=2)
 
@@ -962,11 +1065,13 @@ class NERModel:
         else:
             if not to_predict:
                 if isinstance(data, str):
-                    examples = read_examples_from_file(data, mode)
+                    examples = read_examples_from_file(
+                        data, mode, bbox=True if self.args.model_type == "layoutlm" else False
+                    )
                 else:
                     if self.args.lazy_loading:
                         raise ValueError("Input must be given as a path to a file when using lazy loading")
-                    examples = get_examples_from_df(data)
+                    examples = get_examples_from_df(data, bbox=True if self.args.model_type == "layoutlm" else False)
             else:
                 examples = to_predict
                 no_cache = True
@@ -1020,9 +1125,54 @@ class NERModel:
             all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
             all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
 
-            dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+            if self.args.model_type == "layoutlm":
+                all_bboxes = torch.tensor([f.bboxes for f in features], dtype=torch.long)
+
+            if self.args.onnx:
+                return all_label_ids
+
+            if self.args.model_type == "layoutlm":
+                dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_bboxes)
+            else:
+                dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
 
         return dataset
+
+    def convert_to_onnx(self, output_dir=None, set_onnx_arg=True):
+        """Convert the model to ONNX format and save to output_dir
+
+        Args:
+            output_dir (str, optional): If specified, ONNX model will be saved to output_dir (else args.output_dir will be used). Defaults to None.
+            set_onnx_arg (bool, optional): Updates the model args to set onnx=True. Defaults to True.
+        """  # noqa
+        if not output_dir:
+            output_dir = os.path.join(self.args.output_dir, "onnx")
+        os.makedirs(output_dir, exist_ok=True)
+
+        if os.listdir(output_dir):
+            raise ValueError(
+                "Output directory ({}) already exists and is not empty."
+                " Output directory for onnx conversion must be empty.".format(output_dir)
+            )
+
+        onnx_model_name = os.path.join(output_dir, "onnx_model.onnx")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.save_model(output_dir=temp_dir, model=self.model)
+
+            convert(
+                framework="pt",
+                model=temp_dir,
+                tokenizer=self.tokenizer,
+                output=Path(onnx_model_name),
+                pipeline_name="ner",
+                opset=11,
+            )
+
+        self.args.onnx = True
+        self.tokenizer.save_pretrained(output_dir)
+        self.config.save_pretrained(output_dir)
+        self._save_model_args(output_dir)
 
     def _move_model_to_device(self):
         self.model.to(self.device)
@@ -1037,8 +1187,11 @@ class NERModel:
             "labels": batch[3],
         }
         # XLM, DistilBERT, RoBERTa, and XLM-RoBERTa don't use segment_ids
-        if self.args.model_type in ["bert", "xlnet", "albert"]:
+        if self.args.model_type in ["bert", "xlnet", "albert", "layoutlm"]:
             inputs["token_type_ids"] = batch[2]
+
+        if self.args.model_type == "layoutlm":
+            inputs["bbox"] = batch[4]
 
         return inputs
 
@@ -1056,7 +1209,7 @@ class NERModel:
 
         return training_progress_scores
 
-    def _save_model(self, output_dir=None, optimizer=None, scheduler=None, model=None, results=None):
+    def save_model(self, output_dir=None, optimizer=None, scheduler=None, model=None, results=None):
         if not output_dir:
             output_dir = self.args.output_dir
         os.makedirs(output_dir, exist_ok=True)

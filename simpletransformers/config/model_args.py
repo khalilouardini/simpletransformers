@@ -24,12 +24,12 @@ class ModelArgs:
     adam_epsilon: float = 1e-8
     best_model_dir: str = "outputs/best_model"
     cache_dir: str = "cache_dir/"
+    config: dict = field(default_factory=dict)
     custom_layer_parameters: list = field(default_factory=list)
     custom_parameter_groups: list = field(default_factory=list)
-    train_custom_parameters_only: bool = False
-    config: dict = field(default_factory=dict)
     dataloader_num_workers: int = field(default_factory=get_default_process_count)
     do_lower_case: bool = False
+    dynamic_quantize: bool = False
     early_stopping_consider_epochs: bool = False
     early_stopping_delta: float = 0
     early_stopping_metric: str = "eval_loss"
@@ -41,6 +41,7 @@ class ModelArgs:
     evaluate_during_training_silent: bool = True
     evaluate_during_training_steps: int = 2000
     evaluate_during_training_verbose: bool = False
+    evaluate_each_epoch: bool = True
     fp16: bool = True
     gradient_accumulation_steps: int = 1
     learning_rate: float = 4e-5
@@ -49,8 +50,8 @@ class ModelArgs:
     manual_seed: int = None
     max_grad_norm: float = 1.0
     max_seq_length: int = 128
-    model_type: str = None
     model_name: str = None
+    model_type: str = None
     multiprocessing_chunksize: int = 500
     n_gpu: int = 1
     no_cache: bool = False
@@ -59,15 +60,18 @@ class ModelArgs:
     output_dir: str = "outputs/"
     overwrite_output_dir: bool = False
     process_count: int = field(default_factory=get_default_process_count)
+    quantized_model: bool = False
     reprocess_input_data: bool = True
     save_best_model: bool = True
     save_eval_checkpoints: bool = True
     save_model_every_epoch: bool = True
-    save_steps: int = 2000
     save_optimizer_and_scheduler: bool = True
+    save_steps: int = 2000
     silent: bool = False
     tensorboard_dir: str = None
+    thread_count: int = None
     train_batch_size: int = 8
+    train_custom_parameters_only: bool = False
     use_cached_eval_features: bool = False
     use_early_stopping: bool = False
     use_multiprocessing: bool = True
@@ -115,6 +119,7 @@ class ClassificationArgs(ModelArgs):
     lazy_text_a_column: bool = None
     lazy_text_b_column: bool = None
     lazy_text_column: int = 0
+    onnx: bool = False
     regression: bool = False
     sliding_window: bool = False
     stride: float = 0.8
@@ -148,6 +153,7 @@ class NERArgs(ModelArgs):
     labels_list: list = field(default_factory=list)
     lazy_loading: bool = False
     lazy_loading_start_line: int = 0
+    onnx: bool = False
 
 
 @dataclass

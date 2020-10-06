@@ -326,7 +326,7 @@ class MultiModalClassificationModel:
             **kwargs,
         )
 
-        self._save_model(output_dir, model=self.model)
+        self.save_model(output_dir, model=self.model)
 
         if verbose:
             logger.info(" Training of {} model complete. Saved to {}.".format(self.args.model_type, output_dir))
@@ -532,7 +532,7 @@ class MultiModalClassificationModel:
                         # Save model checkpoint
                         output_dir_current = os.path.join(output_dir, "checkpoint-{}".format(global_step))
 
-                        self._save_model(output_dir_current, model=model)
+                        self.save_model(output_dir_current, model=model)
 
                     if args.evaluate_during_training and (
                         args.evaluate_during_training_steps > 0
@@ -558,7 +558,7 @@ class MultiModalClassificationModel:
                         output_dir_current = os.path.join(output_dir, "checkpoint-{}".format(global_step))
 
                         if args.save_eval_checkpoints:
-                            self._save_model(output_dir_current, model=model, results=results)
+                            self.save_model(output_dir_current, model=model, results=results)
 
                         training_progress_scores["global_step"].append(global_step)
                         training_progress_scores["train_loss"].append(current_loss)
@@ -574,11 +574,11 @@ class MultiModalClassificationModel:
 
                         if not best_eval_metric:
                             best_eval_metric = results[args.early_stopping_metric]
-                            self._save_model(args.best_model_dir, model=model, results=results)
+                            self.save_model(args.best_model_dir, model=model, results=results)
                         if best_eval_metric and args.early_stopping_metric_minimize:
                             if results[args.early_stopping_metric] - best_eval_metric < args.early_stopping_delta:
                                 best_eval_metric = results[args.early_stopping_metric]
-                                self._save_model(args.best_model_dir, model=model, results=results)
+                                self.save_model(args.best_model_dir, model=model, results=results)
                                 early_stopping_counter = 0
                             else:
                                 if args.use_early_stopping:
@@ -597,7 +597,7 @@ class MultiModalClassificationModel:
                         else:
                             if results[args.early_stopping_metric] - best_eval_metric > args.early_stopping_delta:
                                 best_eval_metric = results[args.early_stopping_metric]
-                                self._save_model(args.best_model_dir, model=model, results=results)
+                                self.save_model(args.best_model_dir, model=model, results=results)
                                 early_stopping_counter = 0
                             else:
                                 if args.use_early_stopping:
@@ -621,9 +621,9 @@ class MultiModalClassificationModel:
                 os.makedirs(output_dir_current, exist_ok=True)
 
             if args.save_model_every_epoch:
-                self._save_model(output_dir_current, model=model)
+                self.save_model(output_dir_current, model=model)
 
-            if args.evaluate_during_training:
+            if args.evaluate_during_training and args.evaluate_each_epoch:
                 results, _ = self.eval_model(
                     eval_data,
                     files_list=files_list,
@@ -638,7 +638,7 @@ class MultiModalClassificationModel:
                     **kwargs,
                 )
 
-                self._save_model(output_dir_current, results=results)
+                self.save_model(output_dir_current, results=results)
 
                 training_progress_scores["global_step"].append(global_step)
                 training_progress_scores["train_loss"].append(current_loss)
@@ -651,11 +651,11 @@ class MultiModalClassificationModel:
 
                 if not best_eval_metric:
                     best_eval_metric = results[args.early_stopping_metric]
-                    self._save_model(args.best_model_dir, model=model, results=results)
+                    self.save_model(args.best_model_dir, model=model, results=results)
                 if best_eval_metric and args.early_stopping_metric_minimize:
                     if results[args.early_stopping_metric] - best_eval_metric < args.early_stopping_delta:
                         best_eval_metric = results[args.early_stopping_metric]
-                        self._save_model(args.best_model_dir, model=model, results=results)
+                        self.save_model(args.best_model_dir, model=model, results=results)
                         early_stopping_counter = 0
                     else:
                         if args.use_early_stopping and args.early_stopping_consider_epochs:
@@ -674,7 +674,7 @@ class MultiModalClassificationModel:
                 else:
                     if results[args.early_stopping_metric] - best_eval_metric > args.early_stopping_delta:
                         best_eval_metric = results[args.early_stopping_metric]
-                        self._save_model(args.best_model_dir, model=model, results=results)
+                        self.save_model(args.best_model_dir, model=model, results=results)
                         early_stopping_counter = 0
                     else:
                         if args.use_early_stopping and args.early_stopping_consider_epochs:
@@ -819,6 +819,12 @@ class MultiModalClassificationModel:
         out_label_ids = None
         model.eval()
 
+        if args.n_gpu > 1:
+            model = torch.nn.DataParallel(model)
+
+        if args.fp16:
+            from torch.cuda import amp
+
         for batch in tqdm(eval_dataloader, disable=args.silent or silent, desc="Running Evaluation"):
             batch = tuple(t.to(device) for t in batch)
             labels = batch[5]
@@ -829,7 +835,9 @@ class MultiModalClassificationModel:
                 logits = outputs[0]  # Different from default behaviour
                 tmp_eval_loss = self.criterion(logits, labels)
 
-                eval_loss += tmp_eval_loss.mean().item()
+                if self.args.n_gpu > 1:
+                    tmp_eval_loss = tmp_eval_loss.mean()
+                eval_loss += tmp_eval_loss.item()
 
             nb_eval_steps += 1
 
@@ -1018,17 +1026,29 @@ class MultiModalClassificationModel:
         preds = None
         out_label_ids = None
 
+        if args.n_gpu > 1:
+            model = torch.nn.DataParallel(model)
+
+        if args.fp16:
+            from torch.cuda import amp
+
         for batch in tqdm(eval_dataloader, disable=args.silent, desc="Running Prediction"):
             batch = tuple(t.to(device) for t in batch)
             labels = batch[5]
             with torch.no_grad():
                 inputs = self._get_inputs_dict(batch)
-
-                outputs = model(**inputs)
-                logits = outputs[0]  # Different from default behaviour
+                if self.args.fp16:
+                    with amp.autocast():
+                        outputs = model(**inputs)
+                        logits = outputs[0]  # Different from default behaviour
+                else:
+                    outputs = model(**inputs)
+                    logits = outputs[0]  # Different from default behaviour
                 tmp_eval_loss = self.criterion(logits, labels)
 
-                eval_loss += tmp_eval_loss.mean().item()
+                if self.args.n_gpu > 1:
+                    tmp_eval_loss = tmp_eval_loss.mean()
+                eval_loss += tmp_eval_loss.item()
 
             nb_eval_steps += 1
 
@@ -1122,7 +1142,7 @@ class MultiModalClassificationModel:
 
         return training_progress_scores
 
-    def _save_model(self, output_dir, model=None, results=None):
+    def save_model(self, output_dir, model=None, results=None):
         os.makedirs(output_dir, exist_ok=True)
 
         if model and not self.args.no_save:
@@ -1133,7 +1153,7 @@ class MultiModalClassificationModel:
             torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
             self.transformer_config.architectures = [model_to_save.__class__.__name__]
             self.transformer_config.save_pretrained(output_dir)
-            self._save_model_args(output_dir)
+            self.save_model_args(output_dir)
 
         if results:
             output_eval_file = os.path.join(output_dir, "eval_results.txt")
@@ -1141,7 +1161,7 @@ class MultiModalClassificationModel:
                 for key in sorted(results.keys()):
                     writer.write("{} = {}\n".format(key, str(results[key])))
 
-    def _save_model_args(self, output_dir):
+    def save_model_args(self, output_dir):
         os.makedirs(output_dir, exist_ok=True)
         self.args.save(output_dir)
 

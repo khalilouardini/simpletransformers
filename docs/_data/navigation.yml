@@ -109,6 +109,16 @@ docs:
         url: /docs/seq2seq-data-formats/
       - title: "Seq2Seq Minimal Start"
         url: /docs/seq2seq-minimal-start/
+  - title: Conversational AI
+    children:
+      - title: "Conversational AI Specifics"
+        url: /docs/convAI-specifics/
+      - title: "Conversational AI Model"
+        url: /docs/convAI-model/
+      - title: "Conversational AI Data Formats"
+        url: /docs/convAI-data-formats/
+      - title: "Conversational AI Minimal Start"
+        url: /docs/convAI-minimal-start/
   - title: Text Representation Generation
     children:
       - title: "Text Representation Examples"
