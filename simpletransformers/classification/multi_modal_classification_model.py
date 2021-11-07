@@ -23,7 +23,7 @@ from sklearn.metrics import (
     matthews_corrcoef,
     mean_squared_error,
 )
-from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm, trange
@@ -36,7 +36,7 @@ from transformers import (
     BertTokenizer,
     get_linear_schedule_with_warmup,
 )
-from transformers.configuration_mmbt import MMBTConfig
+from transformers.models.mmbt.configuration_mmbt import MMBTConfig
 
 from simpletransformers.classification.classification_utils import (
     ImageEncoder,
