@@ -14,12 +14,12 @@ from transformers import (
     XLNetModel,
     XLNetPreTrainedModel,
 )
-from transformers.configuration_distilbert import DistilBertConfig
-from transformers.configuration_roberta import RobertaConfig
-from transformers.configuration_xlm_roberta import XLMRobertaConfig
-from transformers.modeling_albert import AlbertConfig, AlbertModel, AlbertPreTrainedModel
-from transformers.modeling_distilbert import DISTILBERT_PRETRAINED_MODEL_ARCHIVE_LIST
-from transformers.modeling_electra import (
+from transformers.models.distilbert.configuration_distilbert import DistilBertConfig
+from transformers.models.roberta.configuration_roberta import RobertaConfig
+from transformers.models.xlm_roberta.configuration_xlm_roberta import XLMRobertaConfig
+from transformers.models.albert.modeling_albert import AlbertConfig, AlbertModel, AlbertPreTrainedModel
+from transformers.models.distilbert.modeling_distilbert import DISTILBERT_PRETRAINED_MODEL_ARCHIVE_LIST
+from transformers.models.electra.modeling_electra import (
     ELECTRA_PRETRAINED_MODEL_ARCHIVE_LIST,
     ElectraConfig,
     ElectraModel,
@@ -30,8 +30,8 @@ from transformers.modeling_roberta import (
     RobertaClassificationHead,
     RobertaForQuestionAnswering,
 )
-from transformers.modeling_utils import PreTrainedModel, SequenceSummary
-from transformers.modeling_xlm_roberta import XLM_ROBERTA_PRETRAINED_MODEL_ARCHIVE_LIST
+from transformers.models.modeling_utils import PreTrainedModel, SequenceSummary
+from transformers.models.xlm_roberta.modeling_xlm_roberta import XLM_ROBERTA_PRETRAINED_MODEL_ARCHIVE_LIST
 
 
 class BertForMultiLabelSequenceClassification(BertPreTrainedModel):
